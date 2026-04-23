@@ -31,5 +31,6 @@ func ToUserResponse(user *User) UserResponse {
 		CreatedAt:       user.CreatedAt,
 		UpdatedAt:       user.UpdatedAt,
 		IsTechnicalUser: user.IsTechnicalUser,
+		TOTPEnabled:     user.TOTPEnabled,
 	}
 }

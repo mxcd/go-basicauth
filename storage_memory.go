@@ -3,6 +3,7 @@ package basicauth
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -119,6 +120,27 @@ func (s *MemoryStorage) UpdateUser(user *User) error {
 	}
 
 	return nil
+}
+
+// ConsumeBackupCodeHash atomically removes the given hash under the write lock,
+// so concurrent calls for the same hash can't both succeed.
+func (s *MemoryStorage) ConsumeBackupCodeHash(userID uuid.UUID, hash string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[userID]
+	if !exists {
+		return false, ErrUserNotFound
+	}
+
+	for i, h := range user.BackupCodeHashes {
+		if h == hash {
+			user.BackupCodeHashes = append(user.BackupCodeHashes[:i:i], user.BackupCodeHashes[i+1:]...)
+			user.UpdatedAt = time.Now()
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *MemoryStorage) DeleteUser(id uuid.UUID) error {

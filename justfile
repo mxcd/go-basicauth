@@ -24,6 +24,9 @@ build:
 example:
 	go run examples/simple/main.go
 
+example-tfa:
+	go run examples/tfa/main.go
+
 clean:
 	rm -f coverage.out coverage.html
 

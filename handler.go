@@ -86,6 +86,14 @@ func (h *Handler) RegisterRoutes() error {
 		authGroup.POST("/login", h.handleLogin)
 		authGroup.POST("/logout", h.handleLogout)
 		authGroup.GET("/me", h.handleMe)
+
+		if h.Options.Settings.EnableTFA {
+			tfaGroup := authGroup.Group("/tfa")
+			tfaGroup.POST("/setup", h.handleTFASetup)
+			tfaGroup.POST("/enable", h.handleTFAEnable)
+			tfaGroup.POST("/disable", h.handleTFADisable)
+			tfaGroup.POST("/verify", h.handleTFAVerify)
+		}
 	}
 
 	return nil
@@ -115,6 +123,21 @@ func (h *Handler) createSession(c *gin.Context, user *User) error {
 	session, _ := h.sessionStore.Get(c.Request, h.Options.Settings.SessionName)
 
 	session.Values["user_id"] = user.ID.String()
+	return session.Save(c.Request, c.Writer)
+}
+
+func (h *Handler) createPendingTFASession(c *gin.Context, user *User) error {
+	session, _ := h.sessionStore.Get(c.Request, h.Options.Settings.SessionName)
+
+	delete(session.Values, "user_id")
+	session.Values[sessionKeyPendingTFAUserID] = user.ID.String()
+
+	ttl := h.Options.Settings.TFA.PendingSessionTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	session.Options.MaxAge = int(ttl.Seconds())
+
 	return session.Save(c.Request, c.Writer)
 }
 
@@ -311,6 +334,21 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		return
 	}
 
+	if h.Options.Settings.EnableTFA && user.TOTPEnabled {
+		if err := h.createPendingTFASession(c, user); err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error:   "internal_error",
+				Message: h.Options.Settings.Messages.InternalError,
+			})
+			return
+		}
+		c.JSON(http.StatusAccepted, SuccessResponse{
+			Message: h.Options.Settings.Messages.TFARequired,
+			Data:    gin.H{"tfaRequired": true},
+		})
+		return
+	}
+
 	if err := h.createSession(c, user); err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error:   "internal_error",
@@ -362,12 +400,24 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 
 	// Auth endpoints with hardcoded access rules
 	publicAuthPaths := map[string]bool{
-		baseUrl + "/register": true,
-		baseUrl + "/login":    true,
+		baseUrl + "/register":   true,
+		baseUrl + "/login":      true,
+		baseUrl + "/tfa/verify": true, // reachable only with a pending session; handler enforces
 	}
 	protectedAuthPaths := map[string]bool{
-		baseUrl + "/logout": true,
-		baseUrl + "/me":     true,
+		baseUrl + "/logout":      true,
+		baseUrl + "/me":          true,
+		baseUrl + "/tfa/setup":   true,
+		baseUrl + "/tfa/enable":  true,
+		baseUrl + "/tfa/disable": true,
+	}
+	// When TFA.Required is set, these paths stay reachable for authenticated
+	// but not-yet-enrolled users so they can complete enrollment.
+	tfaSetupBypassPaths := map[string]bool{
+		baseUrl + "/logout":     true,
+		baseUrl + "/me":         true,
+		baseUrl + "/tfa/setup":  true,
+		baseUrl + "/tfa/enable": true,
 	}
 
 	return func(c *gin.Context) {
@@ -400,6 +450,15 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 			c.JSON(http.StatusUnauthorized, ErrorResponse{
 				Error:   "unauthorized",
 				Message: h.Options.Settings.Messages.Unauthorized,
+			})
+			c.Abort()
+			return
+		}
+
+		if h.Options.Settings.EnableTFA && h.Options.Settings.TFA.Required && !user.TOTPEnabled && !tfaSetupBypassPaths[requestPath] {
+			c.JSON(http.StatusForbidden, ErrorResponse{
+				Error:   "tfa_setup_required",
+				Message: h.Options.Settings.Messages.TFASetupRequired,
 			})
 			c.Abort()
 			return

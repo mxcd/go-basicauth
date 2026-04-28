@@ -17,7 +17,8 @@ type TFASetupResponse struct {
 }
 
 type TFAEnableRequest struct {
-	Code string `json:"code" binding:"required"`
+	Code     string `json:"code" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 type TFAEnableResponse struct {
@@ -36,7 +37,6 @@ type TFAVerifyRequest struct {
 const (
 	sessionKeyPendingTFAUserID = "pending_tfa_user_id"
 	sessionKeyPendingTFASecret = "pending_tfa_secret"
-	sessionKeyTFAAttempts      = "tfa_verify_attempts"
 )
 
 func (h *Handler) handleTFASetup(c *gin.Context) {
@@ -87,6 +87,12 @@ func (h *Handler) handleTFAEnable(c *gin.Context) {
 	var req TFAEnableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid_request", Message: err.Error()})
+		return
+	}
+
+	valid, _, err := VerifyPassword(req.Password, user.PasswordHash)
+	if err != nil || !valid {
+		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid_credentials", Message: h.Options.Settings.Messages.InvalidCredentials})
 		return
 	}
 
@@ -195,6 +201,15 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 		return
 	}
 
+	// Budget already exhausted — reject without attempting verification so a
+	// replayed pending cookie cannot brute-force past the limit.
+	if max := h.Options.Settings.TFA.MaxVerifyAttempts; max > 0 && user.TOTPFailedAttempts >= max {
+		delete(session.Values, sessionKeyPendingTFAUserID)
+		_ = session.Save(c.Request, c.Writer)
+		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid_tfa_code", Message: h.Options.Settings.Messages.InvalidTFACode})
+		return
+	}
+
 	var req TFAVerifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid_request", Message: err.Error()})
@@ -219,13 +234,21 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 	}
 
 	if !verified {
-		h.recordFailedTFAAttempt(c, session)
+		h.recordFailedTFAAttempt(c, session, user)
 		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid_tfa_code", Message: h.Options.Settings.Messages.InvalidTFACode})
 		return
 	}
 
+	if user.TOTPFailedAttempts != 0 {
+		user.TOTPFailedAttempts = 0
+		user.UpdatedAt = time.Now()
+		if err := h.Options.Storage.UpdateUser(user); err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
+			return
+		}
+	}
+
 	delete(session.Values, sessionKeyPendingTFAUserID)
-	delete(session.Values, sessionKeyTFAAttempts)
 	if err := session.Save(c.Request, c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
 		return
@@ -269,22 +292,23 @@ func (h *Handler) consumeBackupCodeHash(user *User, hash string) (bool, error) {
 	return true, nil
 }
 
-// recordFailedTFAAttempt increments the attempt counter; when it reaches
-// MaxVerifyAttempts the pending session is destroyed, forcing re-login.
-func (h *Handler) recordFailedTFAAttempt(c *gin.Context, session *sessions.Session) {
+// recordFailedTFAAttempt increments the per-user attempt counter; when it
+// reaches MaxVerifyAttempts the pending session is destroyed, forcing a
+// fresh password login (which resets the counter in createPendingTFASession).
+// The counter is persisted on the User record so that replaying the pending
+// cookie cannot reset the budget.
+func (h *Handler) recordFailedTFAAttempt(c *gin.Context, session *sessions.Session, user *User) {
 	max := h.Options.Settings.TFA.MaxVerifyAttempts
 	if max <= 0 {
 		return
 	}
 
-	attempts, _ := session.Values[sessionKeyTFAAttempts].(int)
-	attempts++
+	user.TOTPFailedAttempts++
+	user.UpdatedAt = time.Now()
+	_ = h.Options.Storage.UpdateUser(user)
 
-	if attempts >= max {
+	if user.TOTPFailedAttempts >= max {
 		delete(session.Values, sessionKeyPendingTFAUserID)
-		delete(session.Values, sessionKeyTFAAttempts)
-	} else {
-		session.Values[sessionKeyTFAAttempts] = attempts
+		_ = session.Save(c.Request, c.Writer)
 	}
-	_ = session.Save(c.Request, c.Writer)
 }

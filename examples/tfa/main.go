@@ -85,7 +85,7 @@ func main() {
 	log.Println("  2. GET  /protected               -> 403 { error: tfa_setup_required }")
 	log.Println("  3. POST /auth/tfa/setup          -> returns {secret, otpauthUrl}")
 	log.Println("     Scan otpauthUrl in your authenticator app")
-	log.Println("  4. POST /auth/tfa/enable         {code} -> returns {backupCodes}")
+	log.Println("  4. POST /auth/tfa/enable         {code, password} -> returns {backupCodes}")
 	log.Println("  5. GET  /protected               -> 200 (now allowed)")
 	log.Println("  6. POST /auth/logout")
 	log.Println("  7. POST /auth/login              {identifier, password} -> 202 tfaRequired")

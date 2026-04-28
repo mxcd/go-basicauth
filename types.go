@@ -19,10 +19,11 @@ type User struct {
 	IsTechnicalUser bool    `json:"isTechnicalUser"` // For future API key support
 	APIKeyHash      *string `json:"-"`
 
-	TOTPSecret       *string    `json:"-"`
-	TOTPEnabled      bool       `json:"totpEnabled"`
-	TOTPEnrolledAt   *time.Time `json:"totpEnrolledAt,omitempty"`
-	BackupCodeHashes []string   `json:"-"`
+	TOTPSecret         *string    `json:"-"`
+	TOTPEnabled        bool       `json:"totpEnabled"`
+	TOTPEnrolledAt     *time.Time `json:"totpEnrolledAt,omitempty"`
+	BackupCodeHashes   []string   `json:"-"`
+	TOTPFailedAttempts int        `json:"-"` // counter for MaxVerifyAttempts; resets on successful login or verify
 }
 
 type RegisterRequest struct {

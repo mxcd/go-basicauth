@@ -54,8 +54,15 @@ func generateBackupCodes(count, length int, alphabet string, params Params) (pla
 	if length <= 0 {
 		return nil, nil, errors.New("TFA.BackupCodeLength must be > 0")
 	}
-	if len(alphabet) < 2 {
-		return nil, nil, errors.New("TFA.BackupCodeAlphabet must contain at least 2 characters")
+	// Normalize to lowercase so issued codes and their hashes agree with the
+	// case-insensitive verification path in findBackupCodeMatch.
+	alphabet = strings.ToLower(alphabet)
+	seen := make(map[rune]struct{}, len(alphabet))
+	for _, r := range alphabet {
+		seen[r] = struct{}{}
+	}
+	if len(seen) < 2 {
+		return nil, nil, errors.New("TFA.BackupCodeAlphabet must contain at least 2 distinct characters")
 	}
 
 	plain = make([]string, count)

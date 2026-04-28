@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,7 +91,10 @@ func enrollTFA(t *testing.T, client *http.Client, baseURL string) (secret string
 		t.Fatalf("generate code: %v", err)
 	}
 
-	resp = doJSON(t, client, "POST", baseURL+"/auth/tfa/enable", map[string]any{"code": code})
+	resp = doJSON(t, client, "POST", baseURL+"/auth/tfa/enable", map[string]any{
+		"code":     code,
+		"password": "Password123",
+	})
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -142,7 +146,10 @@ func TestTFA_EnrollmentWrongCode(t *testing.T) {
 		t.Fatalf("setup: %d", resp.StatusCode)
 	}
 
-	resp = doJSON(t, client, "POST", server.URL+"/auth/tfa/enable", map[string]any{"code": "000000"})
+	resp = doJSON(t, client, "POST", server.URL+"/auth/tfa/enable", map[string]any{
+		"code":     "000000",
+		"password": "Password123",
+	})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401 on wrong code, got %d", resp.StatusCode)
@@ -439,7 +446,10 @@ func TestTFA_EnableWithoutSetup(t *testing.T) {
 	client := clientWithJar(t)
 	registerAndLogin(t, client, server.URL)
 
-	resp := doJSON(t, client, "POST", server.URL+"/auth/tfa/enable", map[string]any{"code": "123456"})
+	resp := doJSON(t, client, "POST", server.URL+"/auth/tfa/enable", map[string]any{
+		"code":     "123456",
+		"password": "Password123",
+	})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for enable without prior setup, got %d", resp.StatusCode)
@@ -502,13 +512,36 @@ func TestTFA_CustomBackupCodeAlphabetAndLength(t *testing.T) {
 	registerAndLogin(t, client, server.URL)
 	_, codes := enrollTFA(t, client, server.URL)
 
+	// Alphabet is normalized to lowercase at generation time so issued codes
+	// and their hashes agree with the case-insensitive verify path.
 	for _, c := range codes {
 		if len(c) != 16 {
 			t.Errorf("expected length 16, got %q (len %d)", c, len(c))
 		}
-		if strings.Trim(c, "ABCDEF") != "" {
+		if strings.Trim(c, "abcdef") != "" {
 			t.Errorf("expected only alphabet chars, got %q", c)
 		}
+	}
+
+	// Regression for the case-mismatch bug: a custom alphabet must actually
+	// verify round-trip, not just look right.
+	resp := doJSON(t, client, "POST", server.URL+"/auth/logout", nil)
+	resp.Body.Close()
+
+	client = clientWithJar(t)
+	resp = doJSON(t, client, "POST", server.URL+"/auth/login", map[string]any{
+		"identifier": "alice",
+		"password":   "Password123",
+	})
+	resp.Body.Close()
+
+	resp = doJSON(t, client, "POST", server.URL+"/auth/tfa/verify", map[string]any{
+		"code":         codes[0],
+		"isBackupCode": true,
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("backup code from custom alphabet failed to verify: expected 200, got %d", resp.StatusCode)
 	}
 }
 
@@ -805,7 +838,7 @@ func TestTFA_VerifyAttemptLimit(t *testing.T) {
 	}
 }
 
-func TestTFA_VerifyAttemptCounterResetsOnSuccess(t *testing.T) {
+func TestTFA_VerifyStillSucceedsWithinAttemptBudget(t *testing.T) {
 	s := tfaSettings()
 	s.TFA.MaxVerifyAttempts = 3
 	_, r := setupTestHandler(s)
@@ -836,6 +869,82 @@ func TestTFA_VerifyAttemptCounterResetsOnSuccess(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 when within attempt budget, got %d", resp.StatusCode)
+	}
+}
+
+// TestTFA_AttemptBudgetSurvivesCookieReplay asserts that the MaxVerifyAttempts
+// counter is per-user (server-side), not per-cookie. A fresh cookie replay
+// cannot reset the budget — otherwise an attacker with a captured pending
+// cookie could guess TOTP indefinitely.
+func TestTFA_AttemptBudgetSurvivesCookieReplay(t *testing.T) {
+	s := tfaSettings()
+	s.TFA.MaxVerifyAttempts = 3
+	_, r := setupTestHandler(s)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	secret, _ := enrollTFA(t, setup, server.URL)
+	resp := doJSON(t, setup, "POST", server.URL+"/auth/logout", nil)
+	resp.Body.Close()
+
+	// Legitimate client logs in to get a pending cookie.
+	clientA := clientWithJar(t)
+	resp = doJSON(t, clientA, "POST", server.URL+"/auth/login", map[string]any{
+		"identifier": "alice",
+		"password":   "Password123",
+	})
+	resp.Body.Close()
+
+	// Snapshot the pending cookie — this is the "captured" cookie the attacker gets.
+	serverURL, _ := url.Parse(server.URL)
+	capturedCookies := clientA.Jar.Cookies(serverURL)
+
+	// Burn 2 wrong attempts on clientA (counter → 2).
+	for range 2 {
+		resp := doJSON(t, clientA, "POST", server.URL+"/auth/tfa/verify", map[string]any{"code": "000000"})
+		resp.Body.Close()
+	}
+
+	// Attacker replays the captured pending cookie. If the counter lived in the
+	// cookie, the attacker would see attempts=0 here. With the server-side
+	// counter, the attacker observes the shared budget: one wrong guess takes
+	// counter to 3 and exhausts the budget for everyone using that user ID.
+	attacker, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar: %v", err)
+	}
+	attacker.SetCookies(serverURL, capturedCookies)
+	clientB := &http.Client{Jar: attacker}
+
+	resp = doJSON(t, clientB, "POST", server.URL+"/auth/tfa/verify", map[string]any{"code": "000000"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 on attacker's wrong guess, got %d", resp.StatusCode)
+	}
+
+	// Budget is now exhausted. Even the legitimate client's correct code is
+	// rejected — the user must log in again to earn a fresh budget.
+	code, _ := totp.GenerateCode(secret, time.Now())
+	resp = doJSON(t, clientA, "POST", server.URL+"/auth/tfa/verify", map[string]any{"code": code})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 after shared budget exhaustion, got %d", resp.StatusCode)
+	}
+
+	// A fresh password login resets the counter (defense against accidental lockouts).
+	clientC := clientWithJar(t)
+	resp = doJSON(t, clientC, "POST", server.URL+"/auth/login", map[string]any{
+		"identifier": "alice",
+		"password":   "Password123",
+	})
+	resp.Body.Close()
+	code, _ = totp.GenerateCode(secret, time.Now())
+	resp = doJSON(t, clientC, "POST", server.URL+"/auth/tfa/verify", map[string]any{"code": code})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 after re-login resets budget, got %d", resp.StatusCode)
 	}
 }
 

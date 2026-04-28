@@ -1,22 +1,26 @@
 default:
 	@just --list
 
+# Packages under test — excludes ./examples/... which are runnable demos,
+# not library code, and would otherwise skew coverage with 0% entries.
+test_packages := `go list ./... | grep -v '/examples/'`
+
 test:
-	go test ./... -v
+	go test {{test_packages}} -v
 
 test-short:
-	go test ./... -v -short
+	go test {{test_packages}} -v -short
 
 test-coverage:
-	go test ./... -cover
+	go test {{test_packages}} -cover
 
 test-coverage-html:
-	go test ./... -coverprofile=coverage.out
+	go test {{test_packages}} -coverprofile=coverage.out
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
 test-race:
-	go test ./... -race
+	go test {{test_packages}} -race
 
 build:
 	go build ./...

@@ -54,4 +54,6 @@ jobs:
         run: go build ./...
 
       - name: Run tests
-        run: go test ./... -v -race -coverprofile=coverage.out -covermode=atomic
+        # Exclude ./examples/... — they are runnable demos, not library code,
+        # and otherwise skew the coverage report with 0%-coverage entries.
+        run: go test $(go list ./... | grep -v '/examples/') -v -race -coverprofile=coverage.out -covermode=atomic

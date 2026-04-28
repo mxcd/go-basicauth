@@ -167,7 +167,7 @@ settings.TFA.Digits = 6                          // digits per code
 settings.TFA.SkewWindows = 1                     // ±1 period tolerance
 settings.TFA.BackupCodeCount = 10                // 0 disables backup codes
 settings.TFA.BackupCodeLength = 10               // characters per code
-settings.TFA.BackupCodeAlphabet = "0123456789"   // e.g. "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for Crockford-style
+settings.TFA.BackupCodeAlphabet = "0123456789"   // e.g. "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for Crockford-style. The alphabet is lowercased before generation so issued codes and verification are case-insensitive. Must contain at least 2 distinct characters. Note: if BackupCodeLength == Digits with a digit-only alphabet, a submitted code could match both a valid TOTP and a backup code; the defaults (length 10 vs 6 digits) avoid this.
 settings.TFA.MaxVerifyAttempts = 5               // wrong codes tolerated before pending session dies (0 = unlimited)
 settings.TFA.Required = false                    // when true, all authenticated users must enroll before accessing protected routes
 settings.TFA.PendingSessionTTL = 5 * time.Minute // how long the "password ok, code pending" cookie lives
@@ -188,7 +188,7 @@ When `EnableTFA` is false (the default), the `/auth/tfa/*` routes are not regist
 1. User is logged in normally (password-only at this point).
 2. `POST /auth/tfa/setup` — returns `{ secret, otpauthUrl, issuer, accountName }`. Render `otpauthUrl` as a QR code, or show `secret` for manual entry. The secret is stashed server-side in the session until the user confirms it.
 3. User scans the QR / enters the secret into their authenticator app, reads back the 6-digit code.
-4. `POST /auth/tfa/enable` with `{ "code": "123456" }` — verifies the code against the pending secret, persists TFA on the user, and returns `{ backupCodes: [...] }`. **Show these to the user exactly once.** They are not recoverable.
+4. `POST /auth/tfa/enable` with `{ "code": "123456", "password": "CurrentPassword123" }` — verifies the code against the pending secret **and** re-verifies the current password (symmetry with `/tfa/disable`, so a session-only attacker cannot bind the account to their own authenticator), persists TFA on the user, and returns `{ backupCodes: [...] }`. **Show these to the user exactly once.** They are not recoverable.
 
 ### Login flow (once enrolled)
 
@@ -218,7 +218,7 @@ curl -X POST http://localhost:8080/auth/tfa/setup -b cookies.txt -c cookies.txt
 
 curl -X POST http://localhost:8080/auth/tfa/enable \
   -H "Content-Type: application/json" \
-  -d '{"code":"123456"}' \
+  -d '{"code":"123456","password":"SecurePass123"}' \
   -b cookies.txt -c cookies.txt
 # → { "backupCodes": ["abcdef0123", "..."] }
 ```
@@ -278,7 +278,7 @@ using the affected-row count to return `removed`. If your `Storage` implements t
 
 ### Rate limiting
 
-`/auth/login` has no built-in rate limiting — neither does any other route. Put throttling at your reverse proxy or as Gin middleware. `/auth/tfa/verify` does have one built-in guard: the `MaxVerifyAttempts` counter lives in the pending session, and when it's exhausted the pending session is invalidated (user has to log in again). That prevents unlimited guessing against a single captured pending cookie but does **not** prevent an attacker from repeatedly re-logging-in to get fresh pending sessions. External rate limiting is still your responsibility.
+`/auth/login` has no built-in rate limiting — neither does any other route. Put throttling at your reverse proxy or as Gin middleware. `/auth/tfa/verify` does have one built-in guard: the `MaxVerifyAttempts` counter is persisted **server-side** on the user record (`User.TOTPFailedAttempts`) and is shared across all pending cookies for that user. Replaying an old pending cookie cannot reset it — the budget is per-user, not per-cookie. When exhausted, subsequent `/tfa/verify` requests are rejected without running verification, and the user must re-authenticate with their password to earn a fresh budget (a successful password login resets the counter). That does **not** prevent an attacker who has the password from repeatedly re-logging-in to get fresh budgets, so external rate limiting on `/auth/login` is still your responsibility.
 
 A runnable end-to-end example lives in `examples/tfa/main.go` (`just example-tfa`).
 

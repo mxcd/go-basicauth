@@ -57,6 +57,12 @@ func NewHandler(options *Options) (*Handler, error) {
 		options.Settings.SessionEncryptionKey,
 	)
 
+	// store.MaxAge(n) updates the securecookie codec's server-side expiry
+	// validator. Without it, the codec keeps gorilla's 30-day default and
+	// accepts replayed cookies far beyond SessionExpiration — overriding
+	// store.Options below only affects the Set-Cookie header client-side.
+	store.MaxAge(int(options.Settings.SessionExpiration.Seconds()))
+
 	store.Options = &sessions.Options{
 		Path:     options.Settings.CookiePath,
 		Domain:   options.Settings.CookieDomain,
@@ -127,6 +133,17 @@ func (h *Handler) createSession(c *gin.Context, user *User) error {
 }
 
 func (h *Handler) createPendingTFASession(c *gin.Context, user *User) error {
+	// Reset the per-user failed-attempt counter: each fresh password-auth
+	// earns a new budget. An attacker replaying an old pending cookie cannot
+	// reset it because reaching this path requires knowing the password.
+	if user.TOTPFailedAttempts != 0 {
+		user.TOTPFailedAttempts = 0
+		user.UpdatedAt = time.Now()
+		if err := h.Options.Storage.UpdateUser(user); err != nil {
+			return err
+		}
+	}
+
 	session, _ := h.sessionStore.Get(c.Request, h.Options.Settings.SessionName)
 
 	delete(session.Values, "user_id")
@@ -334,7 +351,7 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		return
 	}
 
-	if h.Options.Settings.EnableTFA && user.TOTPEnabled {
+	if h.Options.Settings.EnableTFA && user.TOTPEnabled && user.TOTPSecret != nil {
 		if err := h.createPendingTFASession(c, user); err != nil {
 			c.JSON(http.StatusInternalServerError, ErrorResponse{
 				Error:   "internal_error",

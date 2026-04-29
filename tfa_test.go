@@ -328,8 +328,11 @@ func TestTFA_DisableRequiresPassword(t *testing.T) {
 }
 
 func TestTFA_DisabledInSettings(t *testing.T) {
-	// Default settings: EnableTFA is false
-	_, r := setupTestHandler(nil)
+	// Default settings: EnableTFA is false. CookieSecure must be off so the
+	// session cookie survives the plain-HTTP httptest server.
+	s := DefaultSettings()
+	s.CookieSecure = false
+	_, r := setupTestHandler(s)
 	server := httptest.NewServer(r)
 	defer server.Close()
 

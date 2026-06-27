@@ -372,6 +372,42 @@ Passwords are hashed with Argon2id. The library prevents user enumeration by ret
 
 TOTP secrets are stored verbatim on the `User` (base32, as produced by the authenticator standard). Your `Storage` implementation is responsible for encryption at rest if required. Backup codes are never stored in the clear — they are hashed with Argon2id the same way passwords are.
 
+## Migrating from a legacy password scheme
+
+Importing users from another system (PocketBase, Django, Rails, …) usually means
+their stored hashes are **bcrypt**, not Argon2id. Set a `LegacyPasswordVerifier`
+and migrated users keep their existing passwords — no bulk reset:
+
+```go
+settings.LegacyPasswordVerifier = basicauth.BcryptVerifier
+```
+
+On login, if a user's stored hash isn't this library's native Argon2id format,
+the verifier is consulted. On a match the password is transparently re-hashed
+with Argon2id and persisted via `Storage.UpdateUser`, so the legacy hashes fade
+out one login at a time. Native Argon2id users are unaffected (the verifier is
+never reached for them).
+
+`BcryptVerifier` is provided for the common case; the hook itself is a plain
+`func(password, storedHash string) (bool, error)`, so any legacy scheme works —
+return `(true, nil)` on a match, `(false, nil)` on a mismatch, `(false, err)` on
+a malformed/unsupported hash.
+
+**Caveats:**
+
+- **Rate-limit your login endpoint.** Verifying a legacy hash spends different
+  CPU time than the native Argon2id path (and than the fast-fail for an unknown
+  user), so login latency can reveal whether a given account exists or has been
+  migrated yet. This library protects against enumeration with generic error
+  messages, not constant-time responses — pair it with a rate limiter at the
+  transport layer.
+- **bcrypt's 72-byte limit.** bcrypt only inspects the first 72 bytes of a
+  password. A user whose imported password is longer still logs in, but is left
+  on bcrypt rather than re-hashed (Argon2id keys the full input, so a truncated
+  re-hash would lock them out next time). This only affects credentials imported
+  from a system that allowed passwords longer than this library's own 72-byte
+  limit.
+
 ## Example Requests
 
 Register:

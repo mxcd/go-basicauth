@@ -147,6 +147,19 @@ type BasicAuthSettings struct {
 	TFA                  TFASettings
 	Messages             Messages
 	HashingParams        Params
+
+	// LegacyPasswordVerifier, when set, is consulted during login if the stored
+	// password hash is not in this library's native argon2id format — e.g. a
+	// bcrypt hash imported from a legacy system (PocketBase, Django, …). It must
+	// report whether password matches storedHash: (true, nil) on match,
+	// (false, nil) on mismatch, (false, err) on a real error. On a match the
+	// library transparently re-hashes the password with argon2id and persists it
+	// via Storage.UpdateUser, so each migrated user is upgraded on their next
+	// login and the legacy scheme fades out without a bulk password reset.
+	// Keeping the comparison here (rather than baking bcrypt into the library)
+	// lets callers support any legacy scheme without this library taking the
+	// dependency.
+	LegacyPasswordVerifier func(password, storedHash string) (bool, error)
 }
 
 func DefaultSettings() *BasicAuthSettings {

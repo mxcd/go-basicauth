@@ -342,8 +342,7 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		return
 	}
 
-	valid, _, err := VerifyPassword(req.Password, user.PasswordHash)
-	if err != nil || !valid {
+	if !h.verifyLoginPassword(user, req.Password) {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "invalid_credentials",
 			Message: h.Options.Settings.Messages.InvalidCredentials,
@@ -380,6 +379,55 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		Message: h.Options.Settings.Messages.LoginSuccess,
 		Data:    ToUserResponse(user),
 	})
+}
+
+// verifyLoginPassword checks password against the user's stored hash. Native
+// argon2id hashes are verified directly; a stored hash this library cannot
+// parse is offered to Settings.LegacyPasswordVerifier (when configured) so
+// imported credentials still work. A successful legacy verification triggers a
+// transparent re-hash to argon2id. Returns true iff the password is correct.
+func (h *Handler) verifyLoginPassword(user *User, password string) bool {
+	valid, _, err := VerifyPassword(password, user.PasswordHash)
+	if valid {
+		return true
+	}
+	// A nil error means the stored hash was a well-formed argon2id hash and the
+	// password simply did not match — never fall through to the legacy path,
+	// which would otherwise re-check an argon2id reject against bcrypt for nothing.
+	if err == nil {
+		return false
+	}
+
+	verifier := h.Options.Settings.LegacyPasswordVerifier
+	if verifier == nil {
+		return false
+	}
+
+	ok, verr := verifier(password, user.PasswordHash)
+	if verr != nil || !ok {
+		return false
+	}
+
+	h.upgradePasswordHash(user, password)
+	return true
+}
+
+// upgradePasswordHash re-hashes a just-verified legacy password with argon2id
+// and persists it best-effort. Neither a hashing nor a persistence failure may
+// deny an already-verified login: the user authenticated correctly, so they
+// stay on their legacy hash (which still works) and the upgrade simply retries
+// on the next login. HashPassword rejects passwords outside 1–72 bytes, so an
+// imported password longer than bcrypt's 72-byte limit lands here and is left
+// on bcrypt by design (see BcryptVerifier) rather than re-hashed to an argon2id
+// form that would reject the user's full password next time.
+func (h *Handler) upgradePasswordHash(user *User, password string) {
+	newHash, err := HashPassword(password, h.Options.Settings.HashingParams)
+	if err != nil {
+		return
+	}
+	user.PasswordHash = newHash
+	user.UpdatedAt = time.Now()
+	_ = h.Options.Storage.UpdateUser(user)
 }
 
 func (h *Handler) handleLogout(c *gin.Context) {

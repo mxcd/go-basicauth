@@ -103,12 +103,3 @@ func findBackupCodeMatch(hashes []string, code string) (string, bool) {
 	}
 	return "", false
 }
-
-func removeHash(hashes []string, hash string) []string {
-	for i, h := range hashes {
-		if h == hash {
-			return append(hashes[:i:i], hashes[i+1:]...)
-		}
-	}
-	return hashes
-}

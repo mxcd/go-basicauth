@@ -23,7 +23,7 @@ type User struct {
 	TOTPEnabled        bool       `json:"totpEnabled"`
 	TOTPEnrolledAt     *time.Time `json:"totpEnrolledAt,omitempty"`
 	BackupCodeHashes   []string   `json:"-"`
-	TOTPFailedAttempts int        `json:"-"` // counter for MaxVerifyAttempts; resets on successful login or verify
+	TOTPFailedAttempts int        `json:"-"` // counter for MaxVerifyAttempts; owned by Storage.ConsumeTOTPAttempt/ResetTOTPAttempts
 }
 
 type RegisterRequest struct {
@@ -236,4 +236,5 @@ var (
 	ErrInvalidTFACode       = errors.New("invalid two-factor authentication code")
 	ErrTFAPendingOnly       = errors.New("no pending two-factor authentication challenge")
 	ErrTFASetupRequired     = errors.New("two-factor authentication setup required")
+	ErrTFAAttemptsExhausted = errors.New("two-factor authentication attempts exhausted")
 )

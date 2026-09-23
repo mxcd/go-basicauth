@@ -1,6 +1,7 @@
 package basicauth
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,7 @@ func (s *MemoryStorage) CreateUser(user *User) error {
 		}
 	}
 
+	user = cloneUser(user)
 	s.users[user.ID] = user
 
 	if user.Username != nil {
@@ -67,7 +69,7 @@ func (s *MemoryStorage) GetUserByUsername(username string) (*User, error) {
 		return nil, ErrUserNotFound
 	}
 
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (s *MemoryStorage) GetUserByEmail(email string) (*User, error) {
@@ -79,7 +81,7 @@ func (s *MemoryStorage) GetUserByEmail(email string) (*User, error) {
 		return nil, ErrUserNotFound
 	}
 
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (s *MemoryStorage) GetUserByID(id uuid.UUID) (*User, error) {
@@ -91,9 +93,11 @@ func (s *MemoryStorage) GetUserByID(id uuid.UUID) (*User, error) {
 		return nil, ErrUserNotFound
 	}
 
-	return user, nil
+	return cloneUser(user), nil
 }
 
+// UpdateUser writes the profile fields and keeps the stored security state
+// (see Storage), which only the narrow operations below may change.
 func (s *MemoryStorage) UpdateUser(user *User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,37 +114,93 @@ func (s *MemoryStorage) UpdateUser(user *User) error {
 		delete(s.usersByEmail, strings.ToLower(*existingUser.Email))
 	}
 
-	s.users[user.ID] = user
+	updated := cloneUser(user)
+	updated.TOTPSecret = existingUser.TOTPSecret
+	updated.TOTPEnabled = existingUser.TOTPEnabled
+	updated.TOTPEnrolledAt = existingUser.TOTPEnrolledAt
+	updated.BackupCodeHashes = existingUser.BackupCodeHashes
+	updated.TOTPFailedAttempts = existingUser.TOTPFailedAttempts
+	s.users[user.ID] = updated
 
-	if user.Username != nil {
-		s.usersByUsername[strings.ToLower(*user.Username)] = user
+	if updated.Username != nil {
+		s.usersByUsername[strings.ToLower(*updated.Username)] = updated
 	}
-	if user.Email != nil {
-		s.usersByEmail[strings.ToLower(*user.Email)] = user
+	if updated.Email != nil {
+		s.usersByEmail[strings.ToLower(*updated.Email)] = updated
 	}
 
 	return nil
 }
 
-// ConsumeBackupCodeHash atomically removes the given hash under the write lock,
-// so concurrent calls for the same hash can't both succeed.
-func (s *MemoryStorage) ConsumeBackupCodeHash(userID uuid.UUID, hash string) (bool, error) {
+// withUser runs fn on the stored user under the write lock.
+func (s *MemoryStorage) withUser(id uuid.UUID, fn func(*User) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	user, exists := s.users[userID]
+	user, exists := s.users[id]
 	if !exists {
-		return false, ErrUserNotFound
+		return ErrUserNotFound
 	}
+	return fn(user)
+}
 
-	for i, h := range user.BackupCodeHashes {
-		if h == hash {
-			user.BackupCodeHashes = append(user.BackupCodeHashes[:i:i], user.BackupCodeHashes[i+1:]...)
-			user.UpdatedAt = time.Now()
-			return true, nil
+func (s *MemoryStorage) ConsumeTOTPAttempt(userID uuid.UUID, max int) (int, error) {
+	remaining := 0
+	err := s.withUser(userID, func(u *User) error {
+		if u.TOTPFailedAttempts >= max {
+			return ErrTFAAttemptsExhausted
 		}
-	}
-	return false, nil
+		u.TOTPFailedAttempts++
+		remaining = max - u.TOTPFailedAttempts
+		return nil
+	})
+	return remaining, err
+}
+
+func (s *MemoryStorage) ResetTOTPAttempts(userID uuid.UUID) error {
+	return s.withUser(userID, func(u *User) error {
+		u.TOTPFailedAttempts = 0
+		return nil
+	})
+}
+
+func (s *MemoryStorage) ConsumeBackupCode(userID uuid.UUID, hash string) (bool, error) {
+	removed := false
+	err := s.withUser(userID, func(u *User) error {
+		for i, h := range u.BackupCodeHashes {
+			if h == hash {
+				u.BackupCodeHashes = append(u.BackupCodeHashes[:i:i], u.BackupCodeHashes[i+1:]...)
+				u.UpdatedAt = time.Now()
+				removed = true
+				return nil
+			}
+		}
+		return nil
+	})
+	return removed, err
+}
+
+func (s *MemoryStorage) SetTOTP(userID uuid.UUID, secret string, backupCodeHashes []string) error {
+	return s.withUser(userID, func(u *User) error {
+		now := time.Now()
+		u.TOTPSecret = &secret
+		u.TOTPEnabled = true
+		u.TOTPEnrolledAt = &now
+		u.BackupCodeHashes = slices.Clone(backupCodeHashes)
+		u.UpdatedAt = now
+		return nil
+	})
+}
+
+func (s *MemoryStorage) ClearTOTP(userID uuid.UUID) error {
+	return s.withUser(userID, func(u *User) error {
+		u.TOTPSecret = nil
+		u.TOTPEnabled = false
+		u.TOTPEnrolledAt = nil
+		u.BackupCodeHashes = nil
+		u.UpdatedAt = time.Now()
+		return nil
+	})
 }
 
 func (s *MemoryStorage) DeleteUser(id uuid.UUID) error {
@@ -163,4 +223,16 @@ func (s *MemoryStorage) DeleteUser(id uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// cloneUser copies u deep enough that neither side can change the other's
+// slices or pointed-to values.
+func cloneUser(u *User) *User {
+	c := *u
+	c.BackupCodeHashes = slices.Clone(u.BackupCodeHashes)
+	if u.TOTPSecret != nil {
+		secret := *u.TOTPSecret
+		c.TOTPSecret = &secret
+	}
+	return &c
 }

@@ -138,12 +138,8 @@ func (h *Handler) createPendingTFASession(c *gin.Context, user *User) error {
 	// Reset the per-user failed-attempt counter: each fresh password-auth
 	// earns a new budget. An attacker replaying an old pending cookie cannot
 	// reset it because reaching this path requires knowing the password.
-	if user.TOTPFailedAttempts != 0 {
-		user.TOTPFailedAttempts = 0
-		user.UpdatedAt = time.Now()
-		if err := h.Options.Storage.UpdateUser(user); err != nil {
-			return err
-		}
+	if err := h.Options.Storage.ResetTOTPAttempts(user.ID); err != nil {
+		return err
 	}
 
 	session, _ := h.sessionStore.Get(c.Request, h.Options.Settings.SessionName)

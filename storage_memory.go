@@ -187,6 +187,7 @@ func (s *MemoryStorage) SetTOTP(userID uuid.UUID, secret string, backupCodeHashe
 		u.TOTPEnabled = true
 		u.TOTPEnrolledAt = &now
 		u.BackupCodeHashes = slices.Clone(backupCodeHashes)
+		u.TOTPFailedAttempts = 0
 		u.UpdatedAt = now
 		return nil
 	})
@@ -198,6 +199,7 @@ func (s *MemoryStorage) ClearTOTP(userID uuid.UUID) error {
 		u.TOTPEnabled = false
 		u.TOTPEnrolledAt = nil
 		u.BackupCodeHashes = nil
+		u.TOTPFailedAttempts = 0
 		u.UpdatedAt = time.Now()
 		return nil
 	})
@@ -229,10 +231,19 @@ func (s *MemoryStorage) DeleteUser(id uuid.UUID) error {
 // slices or pointed-to values.
 func cloneUser(u *User) *User {
 	c := *u
+	c.Username = clonePtr(u.Username)
+	c.Email = clonePtr(u.Email)
+	c.APIKeyHash = clonePtr(u.APIKeyHash)
+	c.TOTPSecret = clonePtr(u.TOTPSecret)
+	c.TOTPEnrolledAt = clonePtr(u.TOTPEnrolledAt)
 	c.BackupCodeHashes = slices.Clone(u.BackupCodeHashes)
-	if u.TOTPSecret != nil {
-		secret := *u.TOTPSecret
-		c.TOTPSecret = &secret
-	}
 	return &c
+}
+
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }

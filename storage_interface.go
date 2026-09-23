@@ -35,10 +35,11 @@ type Storage interface {
 	// already gone (a racing request used it first).
 	ConsumeBackupCode(userID uuid.UUID, hash string) (bool, error)
 	// SetTOTP enrols the user: stores secret and backupCodeHashes, sets
-	// TOTPEnabled and TOTPEnrolledAt (now). Also used to regenerate.
+	// TOTPEnabled and TOTPEnrolledAt (now) and resets TOTPFailedAttempts to 0.
 	SetTOTP(userID uuid.UUID, secret string, backupCodeHashes []string) error
 	// ClearTOTP disables two-factor authentication: clears TOTPSecret,
-	// TOTPEnrolledAt and BackupCodeHashes and unsets TOTPEnabled.
+	// TOTPEnrolledAt and BackupCodeHashes, unsets TOTPEnabled and resets
+	// TOTPFailedAttempts to 0.
 	ClearTOTP(userID uuid.UUID) error
 
 	// Future: API key authentication

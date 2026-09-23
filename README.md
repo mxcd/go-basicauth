@@ -102,8 +102,8 @@ or reset an attempt counter.
 | `ConsumeTOTPAttempt(id, max)` | Called before a code is verified. Below `max`: increment, return `max - counter`. Otherwise change nothing and return `ErrTFAAttemptsExhausted`. | `UPDATE users SET failed = failed + 1 WHERE id = $1 AND failed < $2 RETURNING $2 - failed` (no row: exhausted) |
 | `ResetTOTPAttempts(id)` | Counter to 0, after a successful password step or code. | `UPDATE users SET failed = 0 WHERE id = $1` |
 | `ConsumeBackupCode(id, hash)` | Remove `hash` if present; `true` if this call removed it. | `UPDATE users SET codes = array_remove(codes, $2) WHERE id = $1 AND $2 = ANY(codes)`, affected rows = 1 |
-| `SetTOTP(id, secret, hashes)` | Enrol or regenerate: store secret and hashes, set enabled and enrolment time. | |
-| `ClearTOTP(id)` | Disable: clear secret, enrolment time and hashes, unset enabled. | |
+| `SetTOTP(id, secret, hashes)` | Enrol: store secret and hashes, set enabled and enrolment time, counter to 0. | |
+| `ClearTOTP(id)` | Disable: clear secret, enrolment time and hashes, unset enabled, counter to 0. | |
 
 ### Upgrading to v1.5.0 (breaking)
 

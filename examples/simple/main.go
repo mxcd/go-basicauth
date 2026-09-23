@@ -28,6 +28,7 @@ func main() {
 	settings.SessionEncryptionKey = encryptionKey
 	settings.EnableUsernameLogin = true
 	settings.EnableEmailLogin = true
+	settings.EnableRegistration = true // demo: open self-registration (off by default)
 
 	// Optional: Customize settings
 	// settings.CookieSecure = false // Set to false for local development without HTTPS

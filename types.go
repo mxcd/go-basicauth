@@ -129,6 +129,11 @@ type BasicAuthSettings struct {
 	EnableEmailLogin    bool
 	EnableTFA           bool
 
+	// EnableRegistration mounts POST <AuthenticationBaseUrl>/register, which lets
+	// anyone who reaches the server create an account. Off by default: an
+	// application that provisions users itself never exposes self-registration.
+	EnableRegistration bool
+
 	SessionName          string
 	SessionExpiration    time.Duration
 	SessionSecretKey     []byte // 64 bytes for HMAC-SHA256

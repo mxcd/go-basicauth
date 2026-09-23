@@ -20,6 +20,8 @@ func setupTestHandler(settings *BasicAuthSettings) (*Handler, *gin.Engine) {
 	if settings == nil {
 		settings = DefaultSettings()
 	}
+	// The flows under test register their users through the API.
+	settings.EnableRegistration = true
 
 	// Generate session keys if not provided
 	if len(settings.SessionSecretKey) != 64 {

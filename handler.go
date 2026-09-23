@@ -88,7 +88,9 @@ func (h *Handler) RegisterRoutes() error {
 
 	authGroup := h.Options.Engine.Group(baseUrl)
 	{
-		authGroup.POST("/register", h.handleRegister)
+		if h.Options.Settings.EnableRegistration {
+			authGroup.POST("/register", h.handleRegister)
+		}
 		authGroup.POST("/login", h.handleLogin)
 		authGroup.POST("/logout", h.handleLogout)
 		authGroup.GET("/me", h.handleMe)
@@ -463,7 +465,9 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 		baseUrl = "/auth"
 	}
 
-	// Auth endpoints with hardcoded access rules
+	// Auth endpoints with hardcoded access rules. /register stays public even
+	// when registration is disabled, so the request reaches the router and gets
+	// a plain 404 instead of a 401 that would suggest the route exists.
 	publicAuthPaths := map[string]bool{
 		baseUrl + "/register":   true,
 		baseUrl + "/login":      true,

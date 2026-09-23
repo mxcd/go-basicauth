@@ -1,7 +1,9 @@
 package basicauth
 
 import (
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -415,6 +417,7 @@ func setupTestMiddlewareWithCustomBaseUrl(baseUrl string, publicPaths []PublicPa
 	settings.SessionSecretKey = secretKey
 	settings.SessionEncryptionKey = encryptionKey
 	settings.PublicPaths = publicPaths
+	settings.EnableRegistration = true
 
 	handler, _ := NewHandler(&Options{
 		Engine:                r,
@@ -540,5 +543,45 @@ func TestRequireAuth_DefaultBaseUrl_AuthEndpoints(t *testing.T) {
 				t.Errorf("expected status %d, got %d for %s %s", tt.expectStatus, w.Code, tt.method, tt.path)
 			}
 		})
+	}
+}
+
+func TestRegistration_ClosedByDefault(t *testing.T) {
+	if DefaultSettings().EnableRegistration {
+		t.Fatal("EnableRegistration must default to false")
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	settings := DefaultSettings()
+	settings.SessionSecretKey, _ = GenerateSessionSecretKey()
+	settings.SessionEncryptionKey, _ = GenerateSessionEncryptionKey()
+	storage := NewMemoryStorage()
+	handler, err := NewHandler(&Options{Engine: r, AuthenticationBaseUrl: "/api/v1/auth", Storage: storage, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.RegisterRoutes()
+
+	req := httptest.NewRequest("POST", "/api/v1/auth/register", strings.NewReader(`{"username":"mallory","password":"Password123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 with registration disabled, got %d", w.Code)
+	}
+	if _, err := storage.GetUserByUsername("mallory"); err != ErrUserNotFound {
+		t.Errorf("no user may be created, got err=%v", err)
+	}
+}
+
+func TestRegistration_OpenWhenEnabled(t *testing.T) {
+	_, r := setupTestMiddlewareWithCustomBaseUrl("/api/v1/auth", nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/auth/register", strings.NewReader(`{"username":"alice","password":"Password123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201 with registration enabled, got %d", w.Code)
 	}
 }

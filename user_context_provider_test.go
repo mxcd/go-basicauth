@@ -86,6 +86,7 @@ func setupTestHandlerWithUserContext(userKey any, transformer func(c *gin.Contex
 	encryptionKey, _ := GenerateSessionEncryptionKey()
 	settings.SessionSecretKey = secretKey
 	settings.SessionEncryptionKey = encryptionKey
+	settings.EnableRegistration = true
 
 	handler, err := NewHandler(&Options{
 		Engine:                r,

@@ -951,7 +951,7 @@ func TestTFA_AttemptBudgetSurvivesCookieReplay(t *testing.T) {
 	}
 }
 
-func TestMemoryStorage_ConsumeBackupCodeHashIsAtomic(t *testing.T) {
+func TestMemoryStorage_ConsumeBackupCodeIsAtomic(t *testing.T) {
 	storage := NewMemoryStorage()
 	u := "alice"
 	user := &User{
@@ -971,7 +971,7 @@ func TestMemoryStorage_ConsumeBackupCodeHashIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok, err := storage.ConsumeBackupCodeHash(user.ID, "h1")
+			ok, err := storage.ConsumeBackupCode(user.ID, "h1")
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 				return
@@ -993,7 +993,7 @@ func TestMemoryStorage_ConsumeBackupCodeHashIsAtomic(t *testing.T) {
 	}
 }
 
-func TestMemoryStorage_ConsumeBackupCodeHashMissing(t *testing.T) {
+func TestMemoryStorage_ConsumeBackupCodeMissing(t *testing.T) {
 	storage := NewMemoryStorage()
 	u := "alice"
 	user := &User{
@@ -1004,7 +1004,7 @@ func TestMemoryStorage_ConsumeBackupCodeHashMissing(t *testing.T) {
 	}
 	storage.CreateUser(user)
 
-	ok, err := storage.ConsumeBackupCodeHash(user.ID, "missing")
+	ok, err := storage.ConsumeBackupCode(user.ID, "missing")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1012,7 +1012,7 @@ func TestMemoryStorage_ConsumeBackupCodeHashMissing(t *testing.T) {
 		t.Error("expected ok=false for missing hash")
 	}
 
-	ok, err = storage.ConsumeBackupCodeHash(uuid.New(), "h1")
+	ok, err = storage.ConsumeBackupCode(uuid.New(), "h1")
 	if err != ErrUserNotFound {
 		t.Errorf("expected ErrUserNotFound, got %v", err)
 	}

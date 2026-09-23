@@ -1,8 +1,8 @@
 package basicauth
 
 import (
+	"errors"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -117,14 +117,7 @@ func (h *Handler) handleTFAEnable(c *gin.Context) {
 		}
 	}
 
-	now := time.Now()
-	user.TOTPSecret = &pendingSecret
-	user.TOTPEnabled = true
-	user.TOTPEnrolledAt = &now
-	user.BackupCodeHashes = hashed
-	user.UpdatedAt = now
-
-	if err := h.Options.Storage.UpdateUser(user); err != nil {
+	if err := h.Options.Storage.SetTOTP(user.ID, pendingSecret, hashed); err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
 		return
 	}
@@ -162,13 +155,7 @@ func (h *Handler) handleTFADisable(c *gin.Context) {
 		return
 	}
 
-	user.TOTPSecret = nil
-	user.TOTPEnabled = false
-	user.TOTPEnrolledAt = nil
-	user.BackupCodeHashes = nil
-	user.UpdatedAt = time.Now()
-
-	if err := h.Options.Storage.UpdateUser(user); err != nil {
+	if err := h.Options.Storage.ClearTOTP(user.ID); err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
 		return
 	}
@@ -201,19 +188,29 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 		return
 	}
 
-	// Budget already exhausted — reject without attempting verification so a
-	// replayed pending cookie cannot brute-force past the limit.
-	if max := h.Options.Settings.TFA.MaxVerifyAttempts; max > 0 && user.TOTPFailedAttempts >= max {
-		delete(session.Values, sessionKeyPendingTFAUserID)
-		_ = session.Save(c.Request, c.Writer)
-		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid_tfa_code", Message: h.Options.Settings.Messages.InvalidTFACode})
-		return
-	}
-
 	var req TFAVerifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid_request", Message: err.Error()})
 		return
+	}
+
+	// Reserve an attempt before verifying anything: the budget is checked and
+	// spent in one storage step, so neither a replayed pending cookie nor
+	// concurrent requests on several replicas can verify more than max codes.
+	// A successful code resets the counter below.
+	max := h.Options.Settings.TFA.MaxVerifyAttempts
+	remaining := 0
+	if max > 0 {
+		remaining, err = h.Options.Storage.ConsumeTOTPAttempt(user.ID, max)
+		if errors.Is(err, ErrTFAAttemptsExhausted) {
+			h.endPendingTFA(c, session)
+			c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid_tfa_code", Message: h.Options.Settings.Messages.InvalidTFACode})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
+			return
+		}
 	}
 
 	verified := false
@@ -224,7 +221,7 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 	if !verified && h.Options.Settings.TFA.BackupCodeCount > 0 {
 		matchedHash, found := findBackupCodeMatch(user.BackupCodeHashes, req.Code)
 		if found {
-			consumed, cErr := h.consumeBackupCodeHash(user, matchedHash)
+			consumed, cErr := h.Options.Storage.ConsumeBackupCode(user.ID, matchedHash)
 			if cErr != nil {
 				c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
 				return
@@ -234,18 +231,18 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 	}
 
 	if !verified {
-		h.recordFailedTFAAttempt(c, session, user)
+		// The attempt is already counted; the last one ends the pending
+		// session, forcing a fresh password login for a new budget.
+		if max > 0 && remaining == 0 {
+			h.endPendingTFA(c, session)
+		}
 		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "invalid_tfa_code", Message: h.Options.Settings.Messages.InvalidTFACode})
 		return
 	}
 
-	if user.TOTPFailedAttempts != 0 {
-		user.TOTPFailedAttempts = 0
-		user.UpdatedAt = time.Now()
-		if err := h.Options.Storage.UpdateUser(user); err != nil {
-			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
-			return
-		}
+	if err := h.Options.Storage.ResetTOTPAttempts(user.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
+		return
 	}
 
 	delete(session.Values, sessionKeyPendingTFAUserID)
@@ -268,47 +265,7 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 	})
 }
 
-// consumeBackupCodeHash removes a verified backup code hash from the user.
-// If Storage implements AtomicBackupCodeConsumer it is used (race-free);
-// otherwise falls back to read-modify-write via Storage.UpdateUser.
-// Returns true if the hash was removed, false if a racing request beat us to it.
-func (h *Handler) consumeBackupCodeHash(user *User, hash string) (bool, error) {
-	if atomic, ok := h.Options.Storage.(AtomicBackupCodeConsumer); ok {
-		removed, err := atomic.ConsumeBackupCodeHash(user.ID, hash)
-		if err != nil {
-			return false, err
-		}
-		if removed {
-			user.BackupCodeHashes = removeHash(user.BackupCodeHashes, hash)
-		}
-		return removed, nil
-	}
-
-	user.BackupCodeHashes = removeHash(user.BackupCodeHashes, hash)
-	user.UpdatedAt = time.Now()
-	if err := h.Options.Storage.UpdateUser(user); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// recordFailedTFAAttempt increments the per-user attempt counter; when it
-// reaches MaxVerifyAttempts the pending session is destroyed, forcing a
-// fresh password login (which resets the counter in createPendingTFASession).
-// The counter is persisted on the User record so that replaying the pending
-// cookie cannot reset the budget.
-func (h *Handler) recordFailedTFAAttempt(c *gin.Context, session *sessions.Session, user *User) {
-	max := h.Options.Settings.TFA.MaxVerifyAttempts
-	if max <= 0 {
-		return
-	}
-
-	user.TOTPFailedAttempts++
-	user.UpdatedAt = time.Now()
-	_ = h.Options.Storage.UpdateUser(user)
-
-	if user.TOTPFailedAttempts >= max {
-		delete(session.Values, sessionKeyPendingTFAUserID)
-		_ = session.Save(c.Request, c.Writer)
-	}
+func (h *Handler) endPendingTFA(c *gin.Context, session *sessions.Session) {
+	delete(session.Values, sessionKeyPendingTFAUserID)
+	_ = session.Save(c.Request, c.Writer)
 }

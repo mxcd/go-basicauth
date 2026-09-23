@@ -23,7 +23,7 @@ type User struct {
 	TOTPEnabled        bool       `json:"totpEnabled"`
 	TOTPEnrolledAt     *time.Time `json:"totpEnrolledAt,omitempty"`
 	BackupCodeHashes   []string   `json:"-"`
-	TOTPFailedAttempts int        `json:"-"` // counter for MaxVerifyAttempts; resets on successful login or verify
+	TOTPFailedAttempts int        `json:"-"` // counter for MaxVerifyAttempts; owned by Storage.ConsumeTOTPAttempt/ResetTOTPAttempts
 }
 
 type RegisterRequest struct {
@@ -129,6 +129,11 @@ type BasicAuthSettings struct {
 	EnableEmailLogin    bool
 	EnableTFA           bool
 
+	// EnableRegistration mounts POST <AuthenticationBaseUrl>/register, which lets
+	// anyone who reaches the server create an account. Off by default: an
+	// application that provisions users itself never exposes self-registration.
+	EnableRegistration bool
+
 	SessionName          string
 	SessionExpiration    time.Duration
 	SessionSecretKey     []byte // 64 bytes for HMAC-SHA256
@@ -231,4 +236,5 @@ var (
 	ErrInvalidTFACode       = errors.New("invalid two-factor authentication code")
 	ErrTFAPendingOnly       = errors.New("no pending two-factor authentication challenge")
 	ErrTFASetupRequired     = errors.New("two-factor authentication setup required")
+	ErrTFAAttemptsExhausted = errors.New("two-factor authentication attempts exhausted")
 )

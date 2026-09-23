@@ -55,7 +55,7 @@ func main() {
 
 The library sets up these endpoints under your configured base URL (default `/auth`):
 
-- `POST /auth/register` - Create new user
+- `POST /auth/register` - Create new user (only when `Settings.EnableRegistration` is true)
 - `POST /auth/login` - Login with username or email
 - `POST /auth/logout` - Clear session
 - `GET /auth/me` - Get current user info
@@ -77,10 +77,43 @@ type Storage interface {
     GetUserByUsername(username string) (*User, error)
     GetUserByEmail(email string) (*User, error)
     GetUserByID(id uuid.UUID) (*User, error)
-    UpdateUser(user *User) error
+    UpdateUser(user *User) error // profile fields only, see below
     DeleteUser(id uuid.UUID) error
+
+    ConsumeTOTPAttempt(userID uuid.UUID, max int) (remaining int, err error)
+    ResetTOTPAttempts(userID uuid.UUID) error
+    ConsumeBackupCode(userID uuid.UUID, hash string) (bool, error)
+    SetTOTP(userID uuid.UUID, secret string, backupCodeHashes []string) error
+    ClearTOTP(userID uuid.UUID) error
 }
 ```
+
+The two-factor security state of a user (`TOTPSecret`, `TOTPEnabled`,
+`TOTPEnrolledAt`, `BackupCodeHashes`, `TOTPFailedAttempts`) is owned by the
+storage and changes only through the five narrow operations, each of which must
+be atomic on its own. **`UpdateUser` must ignore these fields.** The library
+calls it with a whole `User` it read earlier (for example to upgrade a legacy
+password hash), and with several replicas that value can be stale: writing its
+security fields back would restore a backup code another replica just consumed
+or reset an attempt counter.
+
+| Operation | Contract | SQL sketch |
+|---|---|---|
+| `ConsumeTOTPAttempt(id, max)` | Called before a code is verified. Below `max`: increment, return `max - counter`. Otherwise change nothing and return `ErrTFAAttemptsExhausted`. | `UPDATE users SET failed = failed + 1 WHERE id = $1 AND failed < $2 RETURNING $2 - failed` (no row: exhausted) |
+| `ResetTOTPAttempts(id)` | Counter to 0, after a successful password step or code. | `UPDATE users SET failed = 0 WHERE id = $1` |
+| `ConsumeBackupCode(id, hash)` | Remove `hash` if present; `true` if this call removed it. | `UPDATE users SET codes = array_remove(codes, $2) WHERE id = $1 AND $2 = ANY(codes)`, affected rows = 1 |
+| `SetTOTP(id, secret, hashes)` | Enrol: store secret and hashes, set enabled and enrolment time, counter to 0. | |
+| `ClearTOTP(id)` | Disable: clear secret, enrolment time and hashes, unset enabled, counter to 0. | |
+
+### Upgrading to v1.5.0 (breaking)
+
+- `Storage` gained the five methods above. Existing implementations do not
+  compile until they add them, and their `UpdateUser` has to stop writing the
+  security fields.
+- The optional `AtomicBackupCodeConsumer` interface is gone: rename
+  `ConsumeBackupCodeHash` to `ConsumeBackupCode`; it is now required.
+- `POST /auth/register` is no longer mounted by default. Set
+  `settings.EnableRegistration = true` to keep self-registration.
 
 An in-memory implementation is provided for testing:
 
@@ -96,6 +129,9 @@ settings := basicauth.DefaultSettings()
 // Login methods
 settings.EnableUsernameLogin = true
 settings.EnableEmailLogin = true
+
+// Self-registration via POST /auth/register (off by default)
+settings.EnableRegistration = true
 
 // Session
 settings.SessionExpiration = 24 * time.Hour
@@ -262,23 +298,13 @@ Typical client behavior: on any `403 tfa_setup_required`, redirect the user to y
 
 Required mode only takes effect when `EnableTFA` is also `true`.
 
-### Race-free backup code consumption (optional)
+### Race-free backup code consumption
 
-Backup codes are one-shot. The default flow — read user, verify code, rewrite user via `Storage.UpdateUser` — has a narrow race: two concurrent requests submitting the same code can both succeed before either write lands. If that matters to you, implement the optional `AtomicBackupCodeConsumer` interface on your `Storage`:
-
-```go
-type AtomicBackupCodeConsumer interface {
-    ConsumeBackupCodeHash(userID uuid.UUID, hash string) (removed bool, err error)
-}
-```
-
-For SQL backends this is typically a conditional `UPDATE` such as
-`UPDATE users SET backup_codes = array_remove(backup_codes, $hash) WHERE id = $id AND $hash = ANY(backup_codes)`,
-using the affected-row count to return `removed`. If your `Storage` implements this interface, the library uses it automatically; otherwise it falls back to the standard `UpdateUser` path. The provided `MemoryStorage` already implements it under its mutex.
+Backup codes are one-shot. The library verifies the submitted code against the hashes it read and then calls `Storage.ConsumeBackupCode`; only the request whose call actually removed the hash is let in, so two concurrent requests with the same code cannot both succeed.
 
 ### Rate limiting
 
-`/auth/login` has no built-in rate limiting — neither does any other route. Put throttling at your reverse proxy or as Gin middleware. `/auth/tfa/verify` does have one built-in guard: the `MaxVerifyAttempts` counter is persisted **server-side** on the user record (`User.TOTPFailedAttempts`) and is shared across all pending cookies for that user. Replaying an old pending cookie cannot reset it — the budget is per-user, not per-cookie. When exhausted, subsequent `/tfa/verify` requests are rejected without running verification, and the user must re-authenticate with their password to earn a fresh budget (a successful password login resets the counter). That does **not** prevent an attacker who has the password from repeatedly re-logging-in to get fresh budgets, so external rate limiting on `/auth/login` is still your responsibility.
+`/auth/login` has no built-in rate limiting, and neither does any other route. Put throttling at your reverse proxy or as Gin middleware. `/auth/tfa/verify` does have one built-in guard: the `MaxVerifyAttempts` counter is persisted **server-side** on the user record (`User.TOTPFailedAttempts`) and is shared across all pending cookies and replicas for that user. Each `/tfa/verify` reserves an attempt through `Storage.ConsumeTOTPAttempt` before the code is checked, so concurrent requests cannot verify more than `MaxVerifyAttempts` codes; a successful code resets the counter. Replaying an old pending cookie cannot reset it: the budget is per-user, not per-cookie. When exhausted, subsequent `/tfa/verify` requests are rejected without running verification, and the user must re-authenticate with their password to earn a fresh budget (a successful password login resets the counter). That does **not** prevent an attacker who has the password from repeatedly re-logging-in to get fresh budgets, so external rate limiting on `/auth/login` is still your responsibility.
 
 A runnable end-to-end example lives in `examples/tfa/main.go` (`just example-tfa`).
 

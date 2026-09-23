@@ -26,7 +26,8 @@ func main() {
 	settings := basicauth.DefaultSettings()
 	settings.SessionSecretKey = secretKey
 	settings.SessionEncryptionKey = encryptionKey
-	settings.CookieSecure = false // local dev over HTTP
+	settings.CookieSecure = false      // local dev over HTTP
+	settings.EnableRegistration = true // demo: open self-registration (off by default)
 
 	// Enable TFA. Issuer is required — it's the label shown in authenticator apps.
 	settings.EnableTFA = true

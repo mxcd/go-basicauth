@@ -1,6 +1,7 @@
 package basicauth
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -19,6 +20,16 @@ type spyStorage struct {
 	*MemoryStorage
 	updateUserCalls atomic.Int32
 	afterRead       atomic.Pointer[func(*User)]
+	// loseBackupCodeRace makes ConsumeBackupCode report that a racing
+	// request removed the hash first.
+	loseBackupCodeRace atomic.Bool
+}
+
+func (s *spyStorage) ConsumeBackupCode(userID uuid.UUID, hash string) (bool, error) {
+	if s.loseBackupCodeRace.Load() {
+		return false, nil
+	}
+	return s.MemoryStorage.ConsumeBackupCode(userID, hash)
 }
 
 func (s *spyStorage) UpdateUser(user *User) error {
@@ -65,9 +76,31 @@ func loginPending(t *testing.T, serverURL string) *http.Client {
 
 func verifyCode(t *testing.T, client *http.Client, serverURL, code string, backup bool) int {
 	t.Helper()
+	status, _ := verifyCodeError(t, client, serverURL, code, backup)
+	return status
+}
+
+func verifyCodeError(t *testing.T, client *http.Client, serverURL, code string, backup bool) (int, string) {
+	t.Helper()
 	resp := doJSON(t, client, "POST", serverURL+"/auth/tfa/verify", map[string]any{"code": code, "isBackupCode": backup})
-	resp.Body.Close()
-	return resp.StatusCode
+	defer resp.Body.Close()
+	var body ErrorResponse
+	json.NewDecoder(resp.Body).Decode(&body)
+	return resp.StatusCode, body.Error
+}
+
+// assertPendingSessionEnded refills the budget and submits a valid code: a
+// pending session that is still alive would let it in.
+func assertPendingSessionEnded(t *testing.T, storage *spyStorage, client *http.Client, serverURL, secret string) {
+	t.Helper()
+	if err := storage.ResetTOTPAttempts(aliceID(t, storage)); err != nil {
+		t.Fatal(err)
+	}
+	code, _ := totp.GenerateCode(secret, time.Now())
+	status, errCode := verifyCodeError(t, client, serverURL, code, false)
+	if status != http.StatusUnauthorized || errCode != "tfa_no_pending_challenge" {
+		t.Fatalf("pending session must be gone: got %d %q", status, errCode)
+	}
 }
 
 func aliceID(t *testing.T, s *spyStorage) uuid.UUID {
@@ -99,9 +132,7 @@ func TestTFA_AttemptBudgetCheckedBeforeVerification(t *testing.T) {
 	if got := verifyCode(t, client, server.URL, code, false); got != http.StatusUnauthorized {
 		t.Fatalf("valid code with a spent budget: expected 401, got %d", got)
 	}
-	if got := verifyCode(t, client, server.URL, code, false); got != http.StatusUnauthorized {
-		t.Fatalf("pending session must be gone, got %d", got)
-	}
+	assertPendingSessionEnded(t, storage, client, server.URL, secret)
 
 	// A fresh password step resets the budget.
 	client = loginPending(t, server.URL)
@@ -254,5 +285,84 @@ func TestMemoryStorage_ConsumeTOTPAttempt(t *testing.T) {
 	}
 	if _, err := storage.ConsumeTOTPAttempt(uuid.New(), 3); err != ErrUserNotFound {
 		t.Fatalf("unknown user: expected ErrUserNotFound, got %v", err)
+	}
+}
+
+// The failure that spends the last attempt ends the pending session.
+func TestTFA_LastFailedAttemptEndsPendingSession(t *testing.T) {
+	storage, server := setupSpyServer(t, tfaSettings())
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	secret, _ := enrollTFA(t, setup, server.URL)
+
+	client := loginPending(t, server.URL)
+	for i := range 5 { // the default MaxVerifyAttempts
+		if status, errCode := verifyCodeError(t, client, server.URL, "000000", false); errCode != "invalid_tfa_code" {
+			t.Fatalf("wrong code #%d: got %d %q", i, status, errCode)
+		}
+	}
+	assertPendingSessionEnded(t, storage, client, server.URL, secret)
+}
+
+// A backup code that matches the hashes the handler read is refused when the
+// storage reports another request consumed it first.
+func TestTFA_BackupCodeLostRaceIsRefused(t *testing.T) {
+	storage, server := setupSpyServer(t, tfaSettings())
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	_, codes := enrollTFA(t, setup, server.URL)
+
+	client := loginPending(t, server.URL)
+	storage.loseBackupCodeRace.Store(true)
+	if got := verifyCode(t, client, server.URL, codes[0], true); got != http.StatusUnauthorized {
+		t.Fatalf("backup code consumed by a racing request: expected 401, got %d", got)
+	}
+}
+
+func TestMemoryStorage_SetAndClearTOTPResetAttempts(t *testing.T) {
+	storage := NewMemoryStorage()
+	id := uuid.New()
+	storage.CreateUser(&User{ID: id, PasswordHash: "x"})
+
+	for _, step := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"SetTOTP", func() error { return storage.SetTOTP(id, "S", []string{"h"}) }},
+		{"ClearTOTP", func() error { return storage.ClearTOTP(id) }},
+	} {
+		if _, err := storage.ConsumeTOTPAttempt(id, 5); err != nil {
+			t.Fatal(err)
+		}
+		if err := step.fn(); err != nil {
+			t.Fatal(err)
+		}
+		if u, _ := storage.GetUserByID(id); u.TOTPFailedAttempts != 0 {
+			t.Errorf("%s: expected counter 0, got %d", step.name, u.TOTPFailedAttempts)
+		}
+	}
+}
+
+func TestMemoryStorage_ReturnsIndependentCopies(t *testing.T) {
+	storage := NewMemoryStorage()
+	id := uuid.New()
+	name, email := "alice", "alice@example.com"
+	storage.CreateUser(&User{ID: id, Username: &name, Email: &email, PasswordHash: "x"})
+	storage.SetTOTP(id, "S", []string{"h"})
+
+	u, _ := storage.GetUserByID(id)
+	*u.Username = "mallory"
+	*u.Email = "mallory@example.com"
+	*u.TOTPSecret = "X"
+	*u.TOTPEnrolledAt = time.Time{}
+	u.BackupCodeHashes[0] = "x"
+
+	got, _ := storage.GetUserByID(id)
+	if *got.Username != "alice" || *got.Email != "alice@example.com" || *got.TOTPSecret != "S" ||
+		got.TOTPEnrolledAt.IsZero() || got.BackupCodeHashes[0] != "h" {
+		t.Errorf("stored user changed through a returned copy: %+v", got)
+	}
+	if name != "alice" {
+		t.Error("stored user shares the caller's Username pointer")
 	}
 }

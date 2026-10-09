@@ -151,6 +151,9 @@ func (h *Handler) createPendingTFASession(c *gin.Context, user *User) error {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+	// MaxAge only tells the browser; the codec accepts the cookie for the whole
+	// SessionExpiration, so the signed expiry is what handleTFAVerify enforces.
+	session.Values[sessionKeyPendingTFAExpiresAt] = time.Now().Add(ttl).UnixMilli()
 	session.Options.MaxAge = int(ttl.Seconds())
 
 	return session.Save(c.Request, c.Writer)

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -364,5 +366,39 @@ func TestMemoryStorage_ReturnsIndependentCopies(t *testing.T) {
 	}
 	if name != "alice" {
 		t.Error("stored user shares the caller's Username pointer")
+	}
+}
+
+// The pending challenge expires on the server: a captured cookie replayed
+// after PendingSessionTTL is refused, although the cookie codec itself would
+// accept it for the whole SessionExpiration.
+func TestTFA_ReplayedPendingCookieExpires(t *testing.T) {
+	settings := tfaSettings()
+	settings.TFA.PendingSessionTTL = time.Second
+	_, server := setupSpyServer(t, settings)
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	secret, _ := enrollTFA(t, setup, server.URL)
+
+	client := loginPending(t, server.URL)
+	serverURL, _ := url.Parse(server.URL)
+	captured := client.Jar.Cookies(serverURL)
+	time.Sleep(1500 * time.Millisecond)
+
+	code, _ := totp.GenerateCode(secret, time.Now())
+	req, _ := http.NewRequest("POST", server.URL+"/auth/tfa/verify", strings.NewReader(`{"code":"`+code+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, c := range captured {
+		req.AddCookie(c)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body ErrorResponse
+	json.NewDecoder(resp.Body).Decode(&body)
+	if resp.StatusCode != http.StatusUnauthorized || body.Error != "tfa_no_pending_challenge" {
+		t.Fatalf("replayed expired pending cookie: got %d %q", resp.StatusCode, body.Error)
 	}
 }

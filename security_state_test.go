@@ -419,3 +419,46 @@ func TestTFA_LogoutCancelsPendingChallenge(t *testing.T) {
 	}
 	assertPendingSessionEnded(t, storage, client, server.URL, secret)
 }
+
+// Renaming a user onto another user's username or e-mail fails and leaves
+// both users' index entries alone.
+func TestMemoryStorage_UpdateUserRejectsTakenIdentifiers(t *testing.T) {
+	storage := NewMemoryStorage()
+	alice, bob := "alice", "bob"
+	aliceMail, bobMail := "alice@example.com", "Bob@example.com"
+	idA, idB := uuid.New(), uuid.New()
+	storage.CreateUser(&User{ID: idA, Username: &alice, Email: &aliceMail, PasswordHash: "x"})
+	storage.CreateUser(&User{ID: idB, Username: &bob, Email: &bobMail, PasswordHash: "x"})
+
+	for name, takeOver := range map[string]func(*User){
+		"username": func(u *User) { taken := "BOB"; u.Username = &taken },
+		"email":    func(u *User) { taken := "bob@example.com"; u.Email = &taken },
+	} {
+		u, _ := storage.GetUserByID(idA)
+		takeOver(u)
+		if err := storage.UpdateUser(u); err != ErrUserAlreadyExists {
+			t.Errorf("%s takeover: expected ErrUserAlreadyExists, got %v", name, err)
+		}
+	}
+
+	if u, _ := storage.GetUserByUsername("bob"); u == nil || u.ID != idB {
+		t.Errorf("username bob no longer resolves to bob: %+v", u)
+	}
+	if u, _ := storage.GetUserByEmail("bob@example.com"); u == nil || u.ID != idB {
+		t.Errorf("bob's e-mail no longer resolves to bob: %+v", u)
+	}
+	if u, _ := storage.GetUserByUsername("alice"); u == nil || u.ID != idA {
+		t.Errorf("a refused update dropped alice's username: %+v", u)
+	}
+	if u, _ := storage.GetUserByEmail("alice@example.com"); u == nil || u.ID != idA {
+		t.Errorf("a refused update dropped alice's e-mail: %+v", u)
+	}
+
+	// Changing the case of one's own identifier is not a takeover.
+	u, _ := storage.GetUserByID(idA)
+	upper := "Alice"
+	u.Username = &upper
+	if err := storage.UpdateUser(u); err != nil {
+		t.Errorf("own username in another case: %v", err)
+	}
+}

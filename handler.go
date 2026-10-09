@@ -151,6 +151,9 @@ func (h *Handler) createPendingTFASession(c *gin.Context, user *User) error {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+	// MaxAge only tells the browser; the codec accepts the cookie for the whole
+	// SessionExpiration, so the signed expiry is what handleTFAVerify enforces.
+	session.Values[sessionKeyPendingTFAExpiresAt] = time.Now().Add(ttl).UnixMilli()
 	session.Options.MaxAge = int(ttl.Seconds())
 
 	return session.Save(c.Request, c.Writer)
@@ -418,14 +421,25 @@ func (h *Handler) verifyLoginPassword(user *User, password string) bool {
 // imported password longer than bcrypt's 72-byte limit lands here and is left
 // on bcrypt by design (see BcryptVerifier) rather than re-hashed to an argon2id
 // form that would reject the user's full password next time.
+//
+// The write is based on a fresh read and skipped unless the stored hash is
+// still the one just verified, so a password reset (or any profile change)
+// that landed since the login read the user is not overwritten.
+// ponytail: re-read + compare leaves a window of one storage round trip
+// between GetUserByID and UpdateUser; an optional compare-and-swap Storage
+// operation would close it if that ever matters.
 func (h *Handler) upgradePasswordHash(user *User, password string) {
 	newHash, err := HashPassword(password, h.Options.Settings.HashingParams)
 	if err != nil {
 		return
 	}
-	user.PasswordHash = newHash
-	user.UpdatedAt = time.Now()
-	_ = h.Options.Storage.UpdateUser(user)
+	current, err := h.Options.Storage.GetUserByID(user.ID)
+	if err != nil || current.PasswordHash != user.PasswordHash {
+		return
+	}
+	current.PasswordHash = newHash
+	current.UpdatedAt = time.Now()
+	_ = h.Options.Storage.UpdateUser(current)
 }
 
 func (h *Handler) handleLogout(c *gin.Context) {
@@ -468,9 +482,9 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 		baseUrl + "/register":   true,
 		baseUrl + "/login":      true,
 		baseUrl + "/tfa/verify": true, // reachable only with a pending session; handler enforces
+		baseUrl + "/logout":     true, // also cancels a pending TFA challenge, which has no user yet
 	}
 	protectedAuthPaths := map[string]bool{
-		baseUrl + "/logout":      true,
 		baseUrl + "/me":          true,
 		baseUrl + "/tfa/setup":   true,
 		baseUrl + "/tfa/enable":  true,
@@ -479,7 +493,6 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 	// When TFA.Required is set, these paths stay reachable for authenticated
 	// but not-yet-enrolled users so they can complete enrollment.
 	tfaSetupBypassPaths := map[string]bool{
-		baseUrl + "/logout":     true,
 		baseUrl + "/me":         true,
 		baseUrl + "/tfa/setup":  true,
 		baseUrl + "/tfa/enable": true,
@@ -488,13 +501,13 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 
-		// Register and login are always public
+		// Register, login, TFA verify and logout are always public
 		if publicAuthPaths[requestPath] {
 			c.Next()
 			return
 		}
 
-		// Logout and me are always protected - skip to auth check below
+		// Me and the TFA management endpoints are always protected - skip to auth check below
 		if protectedAuthPaths[requestPath] {
 			// Fall through to authentication check
 		} else {

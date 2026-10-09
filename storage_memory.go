@@ -107,6 +107,17 @@ func (s *MemoryStorage) UpdateUser(user *User) error {
 		return ErrUserNotFound
 	}
 
+	if user.Username != nil {
+		if other, taken := s.usersByUsername[strings.ToLower(*user.Username)]; taken && other.ID != user.ID {
+			return ErrUserAlreadyExists
+		}
+	}
+	if user.Email != nil {
+		if other, taken := s.usersByEmail[strings.ToLower(*user.Email)]; taken && other.ID != user.ID {
+			return ErrUserAlreadyExists
+		}
+	}
+
 	if existingUser.Username != nil {
 		delete(s.usersByUsername, strings.ToLower(*existingUser.Username))
 	}

@@ -57,7 +57,7 @@ The library sets up these endpoints under your configured base URL (default `/au
 
 - `POST /auth/register` - Create new user (only when `Settings.EnableRegistration` is true)
 - `POST /auth/login` - Login with username or email
-- `POST /auth/logout` - Clear session
+- `POST /auth/logout` - Clear session (needs no login, so it also cancels a pending TFA challenge)
 - `GET /auth/me` - Get current user info
 
 When `Settings.EnableTFA` is true, the following are also registered:
@@ -411,7 +411,8 @@ settings.LegacyPasswordVerifier = basicauth.BcryptVerifier
 On login, if a user's stored hash isn't this library's native Argon2id format,
 the verifier is consulted. On a match the password is transparently re-hashed
 with Argon2id and persisted via `Storage.UpdateUser`, so the legacy hashes fade
-out one login at a time. Native Argon2id users are unaffected (the verifier is
+out one login at a time. The upgrade re-reads the user first and is skipped if
+the stored hash changed in the meantime (e.g. a concurrent password reset). Native Argon2id users are unaffected (the verifier is
 never reached for them).
 
 `BcryptVerifier` is provided for the common case; the hook itself is a plain

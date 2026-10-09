@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -364,5 +366,99 @@ func TestMemoryStorage_ReturnsIndependentCopies(t *testing.T) {
 	}
 	if name != "alice" {
 		t.Error("stored user shares the caller's Username pointer")
+	}
+}
+
+// The pending challenge expires on the server: a captured cookie replayed
+// after PendingSessionTTL is refused, although the cookie codec itself would
+// accept it for the whole SessionExpiration.
+func TestTFA_ReplayedPendingCookieExpires(t *testing.T) {
+	settings := tfaSettings()
+	settings.TFA.PendingSessionTTL = time.Second
+	_, server := setupSpyServer(t, settings)
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	secret, _ := enrollTFA(t, setup, server.URL)
+
+	client := loginPending(t, server.URL)
+	serverURL, _ := url.Parse(server.URL)
+	captured := client.Jar.Cookies(serverURL)
+	time.Sleep(1500 * time.Millisecond)
+
+	code, _ := totp.GenerateCode(secret, time.Now())
+	req, _ := http.NewRequest("POST", server.URL+"/auth/tfa/verify", strings.NewReader(`{"code":"`+code+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, c := range captured {
+		req.AddCookie(c)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body ErrorResponse
+	json.NewDecoder(resp.Body).Decode(&body)
+	if resp.StatusCode != http.StatusUnauthorized || body.Error != "tfa_no_pending_challenge" {
+		t.Fatalf("replayed expired pending cookie: got %d %q", resp.StatusCode, body.Error)
+	}
+}
+
+// Logout cancels a pending challenge: it needs no completed login and clears
+// the cookie, so the challenge cannot be finished afterwards.
+func TestTFA_LogoutCancelsPendingChallenge(t *testing.T) {
+	storage, server := setupSpyServer(t, tfaSettings())
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	secret, _ := enrollTFA(t, setup, server.URL)
+
+	client := loginPending(t, server.URL)
+	resp := doJSON(t, client, "POST", server.URL+"/auth/logout", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logout of a pending session: expected 200, got %d", resp.StatusCode)
+	}
+	assertPendingSessionEnded(t, storage, client, server.URL, secret)
+}
+
+// Renaming a user onto another user's username or e-mail fails and leaves
+// both users' index entries alone.
+func TestMemoryStorage_UpdateUserRejectsTakenIdentifiers(t *testing.T) {
+	storage := NewMemoryStorage()
+	alice, bob := "alice", "bob"
+	aliceMail, bobMail := "alice@example.com", "Bob@example.com"
+	idA, idB := uuid.New(), uuid.New()
+	storage.CreateUser(&User{ID: idA, Username: &alice, Email: &aliceMail, PasswordHash: "x"})
+	storage.CreateUser(&User{ID: idB, Username: &bob, Email: &bobMail, PasswordHash: "x"})
+
+	for name, takeOver := range map[string]func(*User){
+		"username": func(u *User) { taken := "BOB"; u.Username = &taken },
+		"email":    func(u *User) { taken := "bob@example.com"; u.Email = &taken },
+	} {
+		u, _ := storage.GetUserByID(idA)
+		takeOver(u)
+		if err := storage.UpdateUser(u); err != ErrUserAlreadyExists {
+			t.Errorf("%s takeover: expected ErrUserAlreadyExists, got %v", name, err)
+		}
+	}
+
+	if u, _ := storage.GetUserByUsername("bob"); u == nil || u.ID != idB {
+		t.Errorf("username bob no longer resolves to bob: %+v", u)
+	}
+	if u, _ := storage.GetUserByEmail("bob@example.com"); u == nil || u.ID != idB {
+		t.Errorf("bob's e-mail no longer resolves to bob: %+v", u)
+	}
+	if u, _ := storage.GetUserByUsername("alice"); u == nil || u.ID != idA {
+		t.Errorf("a refused update dropped alice's username: %+v", u)
+	}
+	if u, _ := storage.GetUserByEmail("alice@example.com"); u == nil || u.ID != idA {
+		t.Errorf("a refused update dropped alice's e-mail: %+v", u)
+	}
+
+	// Changing the case of one's own identifier is not a takeover.
+	u, _ := storage.GetUserByID(idA)
+	upper := "Alice"
+	u.Username = &upper
+	if err := storage.UpdateUser(u); err != nil {
+		t.Errorf("own username in another case: %v", err)
 	}
 }

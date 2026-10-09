@@ -3,6 +3,7 @@ package basicauth
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -35,8 +36,9 @@ type TFAVerifyRequest struct {
 }
 
 const (
-	sessionKeyPendingTFAUserID = "pending_tfa_user_id"
-	sessionKeyPendingTFASecret = "pending_tfa_secret"
+	sessionKeyPendingTFAUserID    = "pending_tfa_user_id"
+	sessionKeyPendingTFAExpiresAt = "pending_tfa_expires_at" // unix milliseconds
+	sessionKeyPendingTFASecret    = "pending_tfa_secret"
 )
 
 func (h *Handler) handleTFASetup(c *gin.Context) {
@@ -171,6 +173,14 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 		return
 	}
 
+	// The browser drops the cookie after PendingSessionTTL, a replayed copy
+	// stops here. A pending session without an expiry predates it and ends too.
+	if expiresAt, _ := session.Values[sessionKeyPendingTFAExpiresAt].(int64); time.Now().UnixMilli() >= expiresAt {
+		h.endPendingTFA(c, session)
+		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "tfa_no_pending_challenge", Message: h.Options.Settings.Messages.TFAPendingOnly})
+		return
+	}
+
 	userID, err := uuid.Parse(pendingID)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "tfa_no_pending_challenge", Message: h.Options.Settings.Messages.TFAPendingOnly})
@@ -246,6 +256,7 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 	}
 
 	delete(session.Values, sessionKeyPendingTFAUserID)
+	delete(session.Values, sessionKeyPendingTFAExpiresAt)
 	if err := session.Save(c.Request, c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "internal_error", Message: h.Options.Settings.Messages.InternalError})
 		return
@@ -267,5 +278,6 @@ func (h *Handler) handleTFAVerify(c *gin.Context) {
 
 func (h *Handler) endPendingTFA(c *gin.Context, session *sessions.Session) {
 	delete(session.Values, sessionKeyPendingTFAUserID)
+	delete(session.Values, sessionKeyPendingTFAExpiresAt)
 	_ = session.Save(c.Request, c.Writer)
 }

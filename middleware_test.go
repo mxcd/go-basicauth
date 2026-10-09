@@ -451,7 +451,7 @@ func TestRequireAuth_CustomBaseUrl_AuthEndpoints(t *testing.T) {
 	}{
 		{"POST", "/api/v1/auth/register", 400, "register should be public (400 = reached handler, not 401)"},
 		{"POST", "/api/v1/auth/login", 400, "login should be public (400 = reached handler, not 401)"},
-		{"POST", "/api/v1/auth/logout", 401, "logout should be protected"},
+		{"POST", "/api/v1/auth/logout", 200, "logout should be public (it also cancels a pending TFA challenge)"},
 		{"GET", "/api/v1/auth/me", 401, "me should be protected"},
 		{"GET", "/api/protected", 401, "other endpoints should be protected by default"},
 	}
@@ -495,7 +495,7 @@ func TestRequireAuth_CustomBaseUrl_WithPublicPaths(t *testing.T) {
 	}{
 		{"POST", "/custom/auth/register", 400, "register should be public with custom base url"},
 		{"POST", "/custom/auth/login", 400, "login should be public with custom base url"},
-		{"POST", "/custom/auth/logout", 401, "logout should be protected with custom base url"},
+		{"POST", "/custom/auth/logout", 200, "logout should be public with custom base url"},
 		{"GET", "/custom/auth/me", 401, "me should be protected with custom base url"},
 		{"GET", "/public/docs", 200, "public paths should still work with custom base url"},
 		{"GET", "/private/data", 401, "private paths should still require auth with custom base url"},
@@ -529,7 +529,7 @@ func TestRequireAuth_DefaultBaseUrl_AuthEndpoints(t *testing.T) {
 	}{
 		{"POST", "/auth/register", 400, "register should be public with default base url"},
 		{"POST", "/auth/login", 400, "login should be public with default base url"},
-		{"POST", "/auth/logout", 401, "logout should be protected with default base url"},
+		{"POST", "/auth/logout", 200, "logout should be public with default base url"},
 		{"GET", "/auth/me", 401, "me should be protected with default base url"},
 	}
 

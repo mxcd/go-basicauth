@@ -57,7 +57,7 @@ The library sets up these endpoints under your configured base URL (default `/au
 
 - `POST /auth/register` - Create new user (only when `Settings.EnableRegistration` is true)
 - `POST /auth/login` - Login with username or email
-- `POST /auth/logout` - Clear session
+- `POST /auth/logout` - Clear session (needs no login, so it also cancels a pending TFA challenge)
 - `GET /auth/me` - Get current user info
 
 When `Settings.EnableTFA` is true, the following are also registered:

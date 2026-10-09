@@ -471,9 +471,9 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 		baseUrl + "/register":   true,
 		baseUrl + "/login":      true,
 		baseUrl + "/tfa/verify": true, // reachable only with a pending session; handler enforces
+		baseUrl + "/logout":     true, // also cancels a pending TFA challenge, which has no user yet
 	}
 	protectedAuthPaths := map[string]bool{
-		baseUrl + "/logout":      true,
 		baseUrl + "/me":          true,
 		baseUrl + "/tfa/setup":   true,
 		baseUrl + "/tfa/enable":  true,
@@ -482,7 +482,6 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 	// When TFA.Required is set, these paths stay reachable for authenticated
 	// but not-yet-enrolled users so they can complete enrollment.
 	tfaSetupBypassPaths := map[string]bool{
-		baseUrl + "/logout":     true,
 		baseUrl + "/me":         true,
 		baseUrl + "/tfa/setup":  true,
 		baseUrl + "/tfa/enable": true,
@@ -491,13 +490,13 @@ func (h *Handler) RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 
-		// Register and login are always public
+		// Register, login, TFA verify and logout are always public
 		if publicAuthPaths[requestPath] {
 			c.Next()
 			return
 		}
 
-		// Logout and me are always protected - skip to auth check below
+		// Me and the TFA management endpoints are always protected - skip to auth check below
 		if protectedAuthPaths[requestPath] {
 			// Fall through to authentication check
 		} else {

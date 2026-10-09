@@ -402,3 +402,20 @@ func TestTFA_ReplayedPendingCookieExpires(t *testing.T) {
 		t.Fatalf("replayed expired pending cookie: got %d %q", resp.StatusCode, body.Error)
 	}
 }
+
+// Logout cancels a pending challenge: it needs no completed login and clears
+// the cookie, so the challenge cannot be finished afterwards.
+func TestTFA_LogoutCancelsPendingChallenge(t *testing.T) {
+	storage, server := setupSpyServer(t, tfaSettings())
+	setup := clientWithJar(t)
+	registerAndLogin(t, setup, server.URL)
+	secret, _ := enrollTFA(t, setup, server.URL)
+
+	client := loginPending(t, server.URL)
+	resp := doJSON(t, client, "POST", server.URL+"/auth/logout", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logout of a pending session: expected 200, got %d", resp.StatusCode)
+	}
+	assertPendingSessionEnded(t, storage, client, server.URL, secret)
+}

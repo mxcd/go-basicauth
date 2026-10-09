@@ -141,3 +141,39 @@ func TestLegacyHash_NoVerifier_Rejected(t *testing.T) {
 		t.Fatalf("legacy hash without verifier: want 401, got %d", code)
 	}
 }
+
+// A password reset that lands between the login's read and the legacy
+// upgrade survives: the upgrade only replaces the hash it verified.
+func TestLegacyUpgrade_KeepsConcurrentPasswordReset(t *testing.T) {
+	settings := DefaultSettings()
+	settings.LegacyPasswordVerifier = BcryptVerifier
+	storage, server := setupSpyServer(t, settings)
+	registerAndLogin(t, clientWithJar(t), server.URL)
+
+	id := aliceID(t, storage)
+	bcryptHash, _ := bcrypt.GenerateFromPassword([]byte("Password123"), bcrypt.MinCost)
+	u, _ := storage.MemoryStorage.GetUserByID(id)
+	u.PasswordHash = string(bcryptHash)
+	if err := storage.MemoryStorage.UpdateUser(u); err != nil {
+		t.Fatal(err)
+	}
+
+	reset := func(*User) {
+		u, _ := storage.MemoryStorage.GetUserByID(id)
+		u.PasswordHash, _ = HashPassword("NewPassword456", settings.HashingParams)
+		if err := storage.MemoryStorage.UpdateUser(u); err != nil {
+			t.Error(err)
+		}
+	}
+	storage.afterRead.Store(&reset)
+	resp := doJSON(t, clientWithJar(t), "POST", server.URL+"/auth/login", map[string]any{"identifier": "alice", "password": "Password123"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("legacy login: expected 200, got %d", resp.StatusCode)
+	}
+
+	stored, _ := storage.MemoryStorage.GetUserByID(id)
+	if ok, _, _ := VerifyPassword("NewPassword456", stored.PasswordHash); !ok {
+		t.Fatal("legacy upgrade overwrote the concurrent password reset")
+	}
+}

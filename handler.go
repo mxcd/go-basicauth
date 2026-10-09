@@ -421,14 +421,25 @@ func (h *Handler) verifyLoginPassword(user *User, password string) bool {
 // imported password longer than bcrypt's 72-byte limit lands here and is left
 // on bcrypt by design (see BcryptVerifier) rather than re-hashed to an argon2id
 // form that would reject the user's full password next time.
+//
+// The write is based on a fresh read and skipped unless the stored hash is
+// still the one just verified, so a password reset (or any profile change)
+// that landed since the login read the user is not overwritten.
+// ponytail: re-read + compare leaves a window of one storage round trip
+// between GetUserByID and UpdateUser; an optional compare-and-swap Storage
+// operation would close it if that ever matters.
 func (h *Handler) upgradePasswordHash(user *User, password string) {
 	newHash, err := HashPassword(password, h.Options.Settings.HashingParams)
 	if err != nil {
 		return
 	}
-	user.PasswordHash = newHash
-	user.UpdatedAt = time.Now()
-	_ = h.Options.Storage.UpdateUser(user)
+	current, err := h.Options.Storage.GetUserByID(user.ID)
+	if err != nil || current.PasswordHash != user.PasswordHash {
+		return
+	}
+	current.PasswordHash = newHash
+	current.UpdatedAt = time.Now()
+	_ = h.Options.Storage.UpdateUser(current)
 }
 
 func (h *Handler) handleLogout(c *gin.Context) {
